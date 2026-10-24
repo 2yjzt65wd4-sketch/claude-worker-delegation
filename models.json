@@ -1,7 +1,7 @@
 {
   "tiers": {
     "fast":   { "model": "deepseek/deepseek-v4.1-flash-1017", "params": { "reasoning": { "enabled": false } }, "use": "summaries, extraction, boilerplate, simple edits" },
-    "code":   { "model": "deepseek/deepseek-v4.1-flash-1017", "use": "writing/refactoring code, tests, diffs" },
+    "code":   { "model": "deepseek/deepseek-v4.1-flash-1017", "params": { "reasoning": { "enabled": false } }, "use": "writing/refactoring code, tests, diffs" },
     "reason": { "model": "deepseek/deepseek-v4-pro",     "use": "tricky logic, debugging hypotheses, second-opinion reviews" },
     "long":   { "model": "google/gemini-3.1-flash-lite", "use": "very large logs/files (1M context)" }
   },
