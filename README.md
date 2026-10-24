@@ -32,7 +32,7 @@ Premium models are great at planning and review, but paying premium rates for th
 - **Tiered models** in `models.json`: `fast`, `code`, `reason`, and `long`. Each tier has a description the architect uses to pick one.
 - **Daily budget cap.** Calls are refused once the day's spend reaches `daily_budget_usd`.
 - **Cost logging.** Every call is appended to `usage.jsonl` with its tokens, dollar cost, and latency.
-- **Path sandbox.** Workers can only read and write files under the session's working directory, plus any extra roots set in `WORKERS_ALLOWED_ROOTS`.
+- **Path sandbox.** Paths are resolved through symlinks before any check. Reads stay under the session's working directory (plus `WORKERS_ALLOWED_ROOTS`); secrets, `.env*`, `.git`, `.ssh` and key files are always refused; `write_to` is disabled unless `WORKERS_WRITE_ROOTS` is set. See [Security](#security).
 - **Guard-railed worker prompt.** Workers are told to answer tersely, return unified diffs for code, and never invent file contents they weren't shown.
 - **Provider settings.** OpenRouter routing sorts by price, allows fallbacks, and denies data collection.
 - **Large-read hook** (`hooks/delegate-large-reads.cjs`). A Claude Code `PreToolUse` hook that blocks whole-file reads over 50 KB, whether through `Read`, `cat`, or `Get-Content`, and points Claude to `delegate` instead.
@@ -44,7 +44,8 @@ The first 12 calls cost **$0.09 total**, and three of them fed about 363K input 
 ## Setup
 
 ```bash
-npm install
+npm ci --ignore-scripts                    # exact versions from package-lock.json
+npm test                                   # offline: a fake OpenRouter on loopback, no key needed
 export OPENROUTER_API_KEY=sk-or-...        # Windows: setx OPENROUTER_API_KEY "sk-or-..."
 claude mcp add workers -- node /path/to/claude-worker-delegation/server.js
 ```
@@ -67,7 +68,29 @@ Then:
 "concurrency": 4
 ```
 
-To change models, edit this file. You don't need to change any code.
+To change models, edit this file, or put overrides in an untracked `models.local.json` that is merged over it key by key (for example `{"tiers": {"code": {"model": "..."}}}`). You don't need to change any code.
+
+Also read from this file: `reserve_usd_per_job` (default 0.05, held against the daily budget while a job runs), `fallback_cost_usd` (default 0.01, charged when OpenRouter reports no cost) and `request_timeout_ms` (default 120000).
+
+## Security
+
+The server sends the files it is given to a third-party model and writes the model's raw output to disk, so it enforces its own rules instead of relying on the client:
+
+| Variable (`;`-separated) | Effect |
+|---|---|
+| `WORKERS_ALLOWED_ROOTS` | Extra read-only roots besides the session's working directory. |
+| `WORKERS_DENY` | Relative paths refused for read and write, on top of the built-in secret rules. |
+| `WORKERS_WRITE_ROOTS` | Folders where `write_to` may create files. Unset means `write_to` is refused. |
+| `WORKERS_WRITE_DENY` | Relative paths refused for write inside the write roots. |
+| `WORKERS_USAGE_LOG` | Where the usage log goes (default `usage.jsonl` next to the server). |
+
+- Every path is resolved with `realpath` first, so a symlink cannot reach outside the roots. A `write_to` target that is itself a symlink is refused.
+- A completion that is empty, or cut by `max_tokens`, is never written; it is still logged, since it was billed. An existing file is replaced only with `overwrite: true`, and never through a link.
+- The daily budget is reserved before the call, so parallel jobs cannot overshoot it. A missing cost is charged at `fallback_cost_usd`, not zero.
+- The usage log holds the length and a short hash of each task, never its text, and is created with mode 0600.
+- `WORKERS_TEST_BASE_URL` redirects the API for tests, and is accepted only for `127.0.0.1` or `localhost`.
+
+The output of a worker is still untrusted text: review what `write_to` wrote before relying on it.
 
 ## Stack
 
