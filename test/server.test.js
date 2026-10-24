@@ -28,6 +28,11 @@ async function startFakeApi() {
         const half = Math.ceil(content.length / 2);
         res.setHeader("content-type", "text/event-stream");
         res.write(": OPENROUTER PROCESSING\n\n");
+        // la réflexion arrive d'abord, lentement, comme chez un modèle qui raisonne
+        for (const piece of state.reasoning || []) {
+          res.write(chunk({ choices: [{ delta: { reasoning: piece }, finish_reason: null }] }));
+          await new Promise((r) => setTimeout(r, state.gap || 0));
+        }
         for (const piece of [content.slice(0, half), content.slice(half)]) {
           res.write(chunk({ choices: [{ delta: { content: piece }, finish_reason: null }] }));
         }
@@ -73,6 +78,8 @@ async function startServer({ spent = 0, worktree = false } = {}) {
     env: {
       OPENROUTER_API_KEY: "test-key",
       WORKERS_IGNORE_LOCAL_CONFIG: "1", // le résultat ne doit pas dépendre du models.local.json de la machine
+      WORKERS_LIVE_DIR: path.join(tmp, "live"), // jamais le vrai dossier live/, que l'élagage viderait
+      WORKERS_PROGRESS_INTERVAL_MS: "100",
       WORKERS_TEST_BASE_URL: `http://127.0.0.1:${api.port}`,
       WORKERS_WRITE_ROOTS: "src;tests",
       WORKERS_DENY: "docs/plan.md",
@@ -81,9 +88,9 @@ async function startServer({ spent = 0, worktree = false } = {}) {
     },
   }));
   return {
-    project, api,
-    call: async (name, args) => {
-      const r = await client.callTool({ name, arguments: args });
+    project, api, live: path.join(tmp, "live"),
+    call: async (name, args, options) => {
+      const r = await client.callTool({ name, arguments: args }, undefined, options);
       return { error: Boolean(r.isError), text: r.content[0].text };
     },
     usage: () => (fs.existsSync(usageLog) ? fs.readFileSync(usageLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []),
@@ -193,6 +200,55 @@ test("une réponse en flux est assemblée, écrite en entier, et son coût et so
   assert.equal(rec.cost, 0.004);
   assert.equal(rec.out, 900);
   assert.equal(rec.reasoning, 850);
+});
+
+test("un job long se suit en direct : notifications de progression et journal live/latest.log", SECOND, async (t) => {
+  const s = await startServer();
+  t.after(() => s.close());
+  s.api.state.sse = true;
+  s.api.state.gap = 150;
+  s.api.state.reasoning = ["Je vérifie d'abord ", "si la clé ", "peut fuiter dans un log."];
+  s.api.state.reply = () => ({ content: "aucun constat", finish_reason: "stop", cost: 0.001 });
+  const seen = [];
+  const r = await s.call("delegate", { task: "TÂCHE-SECRÈTE-789", tier: "reason" }, { onprogress: (p) => seen.push(p) });
+  assert.equal(r.error, false);
+  assert.match(r.text, /aucun constat/);
+
+  assert.ok(seen.length >= 2, `${seen.length} notification(s) de progression`);
+  assert.ok(seen.every((p, i) => i === 0 || p.progress > seen[i - 1].progress), "progress ne fait que croître");
+  assert.ok(seen.every((p) => p.message.startsWith("reason · ")));
+  assert.ok(seen.some((p) => /….*clé/.test(p.message)), "un message montre les derniers mots de la réflexion");
+
+  const live = fs.readFileSync(path.join(s.live, "latest.log"), "utf8");
+  assert.match(live, /── reasoning ──\nJe vérifie d'abord si la clé peut fuiter dans un log\./);
+  assert.match(live, /── answer ──\naucun constat/);
+  assert.match(live, /\[reason\/fake\/model in=10 out=5/);
+  for (const text of [live, ...seen.map((p) => p.message)]) assert.doesNotMatch(text, /TÂCHE-SECRÈTE/, "le texte de la tâche ne sort jamais");
+  assert.equal(fs.statSync(path.join(s.live, fs.readlinkSync(path.join(s.live, "latest.log")))).mode & 0o777, 0o600);
+});
+
+test("un job qui échoue le dit dans le journal live", SECOND, async (t) => {
+  const s = await startServer();
+  t.after(() => s.close());
+  s.api.state.sse = true;
+  s.api.state.reply = () => ({ content: "def f():\n    ret", finish_reason: "length", cost: 0.001 });
+  const r = await s.call("delegate", { task: "t", write_to: "src/h.py" });
+  assert.equal(r.error, true);
+  assert.match(fs.readFileSync(path.join(s.live, "latest.log"), "utf8"), /FAILED: completion truncated/);
+});
+
+test("un lot est suivi par une seule progression qui compte ses jobs", SECOND, async (t) => {
+  const s = await startServer();
+  t.after(() => s.close());
+  s.api.state.sse = true;
+  s.api.state.gap = 120;
+  s.api.state.reasoning = ["a ", "b ", "c"];
+  const seen = [];
+  const r = await s.call("delegate_batch", { jobs: [{ task: "un", tier: "reason" }, { task: "deux", tier: "reason" }] }, { onprogress: (p) => seen.push(p) });
+  assert.equal(r.error, false);
+  assert.ok(seen.length >= 1);
+  assert.ok(seen.every((p) => p.message.startsWith("batch of 2 · ")));
+  assert.equal(fs.readdirSync(s.live).filter((n) => n.endsWith(".log") && n !== "latest.log").length, 2, "un journal par job");
 });
 
 test("une réponse en flux coupée au plafond est refusée par write_to, comme une réponse ordinaire", SECOND, async (t) => {

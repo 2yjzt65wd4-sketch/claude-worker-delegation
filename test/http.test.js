@@ -194,6 +194,34 @@ test("le délai total s'applique aussi à un flux qui ne finit jamais, même s'i
   await assert.rejects(postChat(api.url, INIT, { timeoutMs: 800, idleMs: 5000 }), /did not finish answering within 1s \(request_timeout_ms\)/);
 });
 
+test("onText reçoit la réflexion et la réponse au fil de l'eau, dans l'ordre, sans rien changer au résultat", async (t) => {
+  const api = await fakeApi((req, res) => {
+    sse(res);
+    res.write(event({ choices: [{ delta: { reasoning: "je " } }] }));
+    res.write(event({ choices: [{ delta: { reasoning_content: "pense" } }] }));
+    res.write(delta("Bon"));
+    res.write(delta("jour", "stop"));
+    res.end("data: [DONE]\n\n");
+  });
+  t.after(() => api.close());
+  const seen = [];
+  const r = await postChat(api.url, INIT, { ...LIMITS, onText: (kind, text) => seen.push([kind, text]) });
+  assert.deepEqual(seen, [["reasoning", "je "], ["reasoning", "pense"], ["content", "Bon"], ["content", "jour"]]);
+  assert.equal(r.data.choices[0].message.content, "Bonjour");
+});
+
+test("un observateur qui plante n'interrompt pas la requête", async (t) => {
+  const api = await fakeApi((req, res) => {
+    sse(res);
+    res.write(event({ choices: [{ delta: { reasoning: "x" } }] }));
+    res.write(delta("ok", "stop"));
+    res.end("data: [DONE]\n\n");
+  });
+  t.after(() => api.close());
+  const r = await postChat(api.url, INIT, { ...LIMITS, onText: () => { throw new Error("disque plein"); } });
+  assert.equal(r.data.choices[0].message.content, "ok");
+});
+
 test("describeNetworkError arrondit les délais en secondes et ne cite jamais d'en-tête", () => {
   const message = describeNetworkError(Object.assign(new Error("boom"), { name: "TimeoutError" }), 360000, 600000);
   assert.match(message, /within 360s/);

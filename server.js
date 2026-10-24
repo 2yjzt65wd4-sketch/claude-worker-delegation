@@ -11,7 +11,9 @@ import { createBudget } from "./lib/budget.js";
 import { apiUrl, loadConfig } from "./lib/config.js";
 import { makeGuard } from "./lib/guard.js";
 import { postChat } from "./lib/http.js";
+import { openLiveLog } from "./lib/live.js";
 import { readCompletion, writeOutput } from "./lib/output.js";
+import { createProgress } from "./lib/progress.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // WORKERS_IGNORE_LOCAL_CONFIG=1 skips models.local.json (used by the tests; it changes no protection).
@@ -19,6 +21,9 @@ const CFG = loadConfig(HERE, { useLocal: process.env.WORKERS_IGNORE_LOCAL_CONFIG
 const LOG = process.env.WORKERS_USAGE_LOG || path.join(HERE, "usage.jsonl");
 const KEY = process.env.OPENROUTER_API_KEY;
 const API_URL = apiUrl(process.env.WORKERS_TEST_BASE_URL);
+// Following a long job: live/latest.log (lib/live.js) and progress notifications (lib/progress.js).
+const LIVE_DIR = process.env.WORKERS_LIVE_DIR || path.join(HERE, "live");
+const PROGRESS_MS = Number(process.env.WORKERS_PROGRESS_INTERVAL_MS) || CFG.progress_interval_ms;
 
 // Path policy (see lib/guard.js). All lists are ';'-separated.
 //  WORKERS_ALLOWED_ROOTS  extra read-only roots besides the session cwd
@@ -82,7 +87,7 @@ function buildPrompt(task, files = []) {
   return body;
 }
 
-async function runJob({ task, tier = "fast", files, write_to, max_tokens, overwrite = false }) {
+async function runJob({ task, tier = "fast", files, write_to, max_tokens, overwrite = false }, watch = {}) {
   if (!KEY) throw new Error("OPENROUTER_API_KEY is not set in the environment");
   const t = CFG.tiers[tier];
   if (!t) throw new Error(`unknown tier "${tier}" (have: ${Object.keys(CFG.tiers).join(", ")})`);
@@ -93,6 +98,8 @@ async function runJob({ task, tier = "fast", files, write_to, max_tokens, overwr
     throw new Error(`${write_to} already exists; pass overwrite:true to replace it`);
   }
   const release = budget.reserve();
+  const live = openLiveLog(LIVE_DIR, { tier, keep: CFG.live_log_keep });
+  live.note(`${tier} · ${t.model} · task of ${task.length} chars, ${files?.length ?? 0} file(s)`); // never the task text
   try {
     const started = Date.now();
     const { status, ok, data } = await postChat(API_URL, {
@@ -106,7 +113,11 @@ async function runJob({ task, tier = "fast", files, write_to, max_tokens, overwr
         ...t.params, // per-tier extras, e.g. disabling reasoning on the fast tier
         messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }],
       }),
-    }, { timeoutMs: CFG.request_timeout_ms, idleMs: CFG.stream_idle_timeout_ms });
+    }, {
+      timeoutMs: CFG.request_timeout_ms,
+      idleMs: CFG.stream_idle_timeout_ms,
+      onText: (kind, text) => { live.text(kind, text); watch.progress?.feed(kind, text); },
+    });
     if (!ok || data.error) throw new Error(`OpenRouter ${status}: ${JSON.stringify(data.error || data).slice(0, 500)}`);
     const choice = data.choices?.[0];
     const u = data.usage || {};
@@ -123,6 +134,7 @@ async function runJob({ task, tier = "fast", files, write_to, max_tokens, overwr
     fs.appendFileSync(LOG, JSON.stringify(rec) + "\n", { mode: 0o600 }); // billed, so logged even if the output is unusable
     const meta = `[${tier}/${rec.model} in=${rec.in} out=${rec.out}${rec.reasoning === undefined ? "" : ` (reasoning ${rec.reasoning})`} $${rec.cost.toFixed(5)}${costKnown ? "" : " (estimated)"} ${rec.ms}ms]`;
 
+    live.note(meta);
     const { text, truncated } = readCompletion(choice);
     if (outPath) {
       if (truncated) {
@@ -137,7 +149,11 @@ async function runJob({ task, tier = "fast", files, write_to, max_tokens, overwr
       ? answer.slice(0, CFG.max_return_chars) + `\n[...truncated ${answer.length - CFG.max_return_chars} chars; use write_to for full output]`
       : answer;
     return `${meta}\n${capped}`;
+  } catch (e) {
+    live.note(`FAILED: ${e.message || e}`);
+    throw e;
   } finally {
+    live.close();
     release();
   }
 }
@@ -159,22 +175,31 @@ const fail = (e) => ({ isError: true, content: [{ type: "text", text: String(e.m
 server.registerTool("delegate", {
   description: "Hand a self-contained subtask to a cheap worker model (OpenRouter). Use for bulk reading/summarizing, boilerplate, tests, mechanical edits as diffs, first drafts, or a second opinion. Review the result before acting on it.",
   inputSchema: jobShape,
-}, async (args) => { try { return ok(await runJob(args)); } catch (e) { return fail(e); } });
+}, async (args, extra) => {
+  const progress = createProgress(extra, { intervalMs: PROGRESS_MS, label: args.tier ?? "fast" });
+  try { return ok(await runJob(args, { progress })); } catch (e) { return fail(e); } finally { progress.stop(); }
+});
 
 server.registerTool("delegate_batch", {
   description: "Run several independent worker jobs in parallel. Returns one result block per job.",
   inputSchema: { jobs: z.array(z.object(jobShape)).min(1).max(20) },
-}, async ({ jobs }) => {
+}, async ({ jobs }, extra) => {
   const results = new Array(jobs.length);
+  const progress = createProgress(extra, { intervalMs: PROGRESS_MS, label: `batch of ${jobs.length}`, total: jobs.length });
   let next = 0;
   const lane = async () => {
     while (next < jobs.length) {
       const i = next++;
-      try { results[i] = `## job ${i + 1}\n` + await runJob(jobs[i]); }
+      try { results[i] = `## job ${i + 1}\n` + await runJob(jobs[i], { progress }); }
       catch (e) { results[i] = `## job ${i + 1} FAILED\n${e.message || e}`; }
+      finally { progress.jobDone(); }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(CFG.concurrency, jobs.length) }, lane));
+  try {
+    await Promise.all(Array.from({ length: Math.min(CFG.concurrency, jobs.length) }, lane));
+  } finally {
+    progress.stop();
+  }
   return ok(results.join("\n\n"));
 });
 

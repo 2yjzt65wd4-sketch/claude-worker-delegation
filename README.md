@@ -73,6 +73,15 @@ To change models, edit this file, or put overrides in an untracked `models.local
 
 Also read from this file: `reserve_usd_per_job` (default 0.05, held against the daily budget while a job runs), `fallback_cost_usd` (default 0.01, charged when OpenRouter reports no cost) and `request_timeout_ms` (default 120000). Replies are streamed (server-sent events), because a reasoning model can think for many minutes and a single silent connection is dropped by proxies and NAT layers long before that (observed: a non-streamed request cut after about 9 minutes). Two clocks apply: `request_timeout_ms` bounds the whole request, and `stream_idle_timeout_ms` (default 600000) bounds the silence between two reads, keep-alive comments included, so a dead connection is detected without capping a slow, healthy one. At roughly 50 tokens per second, set `request_timeout_ms` above `default_max_tokens` divided by that rate, otherwise a slow job fails with "did not finish answering" instead of ending at its token limit. A reasoning model can also spend the whole `max_tokens` budget thinking and return nothing ("empty completion"): raise `default_max_tokens` (the model's own maximum is the real ceiling) or cap its effort for that tier (`reasoning.effort`). The usage log records `reasoning`, the part of `out` spent thinking, when OpenRouter reports it.
 
+## Following a long job
+
+A reasoning tier can work for many minutes. Two things let you watch it instead of waiting in silence:
+
+- **`live/latest.log`** is a readable copy of what the worker produces, written as it arrives (reasoning first, then the answer, each under a heading, plus a start line and the final usage line). Follow it with `tail -F tools/claude-worker-delegation/live/latest.log` or open it in an editor tab. `latest.log` is a link to the newest `live/<timestamp>-<tier>.log`; the last `live_log_keep` (default 20) are kept. Files are private (0600), never contain the task text, but can quote the files the worker was given, so `live/` is untracked. Set `WORKERS_LIVE_DIR` to move it.
+- **MCP progress notifications**, sent every `progress_interval_ms` (default 5000) when the client asked for them: stage, elapsed time, how much reasoning and answer has been produced, and the last words of the reasoning. For a batch, one notification covers all jobs. Whether and where a client shows them depends on the client.
+
+Both are best effort and never affect a job.
+
 ## Security
 
 The server sends the files it is given to a third-party model and writes the model's raw output to disk, so it enforces its own rules instead of relying on the client:
