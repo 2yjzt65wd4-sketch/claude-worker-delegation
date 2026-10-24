@@ -59,6 +59,7 @@ async function startServer({ spent = 0, worktree = false } = {}) {
     cwd: project,
     env: {
       OPENROUTER_API_KEY: "test-key",
+      WORKERS_IGNORE_LOCAL_CONFIG: "1", // le résultat ne doit pas dépendre du models.local.json de la machine
       WORKERS_TEST_BASE_URL: `http://127.0.0.1:${api.port}`,
       WORKERS_WRITE_ROOTS: "src;tests",
       WORKERS_DENY: "docs/plan.md",

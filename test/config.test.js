@@ -45,6 +45,20 @@ test("loadConfig applique models.local.json par-dessus models.json, avec des val
   }
 });
 
+test("loadConfig avec useLocal: false ignore models.local.json", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cfg-"));
+  try {
+    fs.writeFileSync(path.join(dir, "models.json"), JSON.stringify({ tiers: { fast: { model: "a" } } }));
+    fs.writeFileSync(path.join(dir, "models.local.json"), JSON.stringify({ tiers: { fast: { model: "local" } }, reserve_usd_per_job: 9 }));
+    const cfg = loadConfig(dir, { useLocal: false });
+    assert.equal(cfg.tiers.fast.model, "a");
+    assert.equal(cfg.reserve_usd_per_job, 0.05);
+    assert.equal(loadConfig(dir).tiers.fast.model, "local");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("apiUrl pointe sur OpenRouter, et n'accepte une surcharge que sur la boucle locale", () => {
   assert.equal(apiUrl(undefined), "https://openrouter.ai/api/v1/chat/completions");
   assert.equal(apiUrl("http://127.0.0.1:4567"), "http://127.0.0.1:4567/api/v1/chat/completions");

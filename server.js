@@ -14,7 +14,8 @@ import { postJson } from "./lib/http.js";
 import { readCompletion, writeOutput } from "./lib/output.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const CFG = loadConfig(HERE);
+// WORKERS_IGNORE_LOCAL_CONFIG=1 skips models.local.json (used by the tests; it changes no protection).
+const CFG = loadConfig(HERE, { useLocal: process.env.WORKERS_IGNORE_LOCAL_CONFIG !== "1" });
 const LOG = process.env.WORKERS_USAGE_LOG || path.join(HERE, "usage.jsonl");
 const KEY = process.env.OPENROUTER_API_KEY;
 const API_URL = apiUrl(process.env.WORKERS_TEST_BASE_URL);
