@@ -59,11 +59,12 @@ Then:
 
 ```json
 "tiers": {
-  "fast":   { "model": "deepseek/deepseek-v4-flash", "use": "summaries, extraction, boilerplate" },
-  "code":   { "model": "qwen/qwen3-coder-next",      "use": "code, tests, diffs" },
-  "reason": { "model": "deepseek/deepseek-v4-pro",   "use": "debugging, second-opinion reviews" },
-  "long":   { "model": "google/gemini-3.1-flash-lite", "use": "very large files (1M context)" }
+  "fast":   { "model": "deepseek/deepseek-v4.1-flash-1017", "params": { "reasoning": { "enabled": false } }, "use": "summaries, extraction, boilerplate" },
+  "code":   { "model": "deepseek/deepseek-v4.1-flash-1017", "params": { "reasoning": { "enabled": false } }, "use": "code, tests, diffs" },
+  "reason": { "model": "deepseek/deepseek-v4.1-flash-1017", "params": { "reasoning": { "enabled": true } },  "use": "debugging, second-opinion reviews" },
+  "long":   { "model": "deepseek/deepseek-v4.1-flash-1017", "params": { "reasoning": { "enabled": false } }, "use": "very large files" }
 },
+"default_max_tokens": 16000,
 "daily_budget_usd": 3.0,
 "concurrency": 4
 ```

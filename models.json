@@ -2,11 +2,11 @@
   "tiers": {
     "fast":   { "model": "deepseek/deepseek-v4.1-flash-1017", "params": { "reasoning": { "enabled": false } }, "use": "summaries, extraction, boilerplate, simple edits" },
     "code":   { "model": "deepseek/deepseek-v4.1-flash-1017", "params": { "reasoning": { "enabled": false } }, "use": "writing/refactoring code, tests, diffs" },
-    "reason": { "model": "deepseek/deepseek-v4-pro",     "use": "tricky logic, debugging hypotheses, second-opinion reviews" },
-    "long":   { "model": "google/gemini-3.1-flash-lite", "use": "very large logs/files (1M context)" }
+    "reason": { "model": "deepseek/deepseek-v4.1-flash-1017", "params": { "reasoning": { "enabled": true } }, "use": "tricky logic, debugging hypotheses, second-opinion reviews" },
+    "long":   { "model": "deepseek/deepseek-v4.1-flash-1017", "params": { "reasoning": { "enabled": false } }, "use": "very large logs/files (each file capped by max_file_bytes)" }
   },
   "provider": { "data_collection": "deny", "sort": "price", "allow_fallbacks": true },
-  "default_max_tokens": 4000,
+  "default_max_tokens": 16000,
   "max_file_bytes": 400000,
   "max_return_chars": 6000,
   "daily_budget_usd": 3.0,
