@@ -194,6 +194,33 @@ test("le délai total s'applique aussi à un flux qui ne finit jamais, même s'i
   await assert.rejects(postChat(api.url, INIT, { timeoutMs: 800, idleMs: 5000 }), /did not finish answering within 1s \(request_timeout_ms\)/);
 });
 
+test("un événement data: vide est ignoré, comme le veut la spécification SSE, au lieu de faire échouer la réponse", async (t) => {
+  const api = await fakeApi((req, res) => {
+    sse(res);
+    res.write(delta("Bon"));
+    res.write("data:\n\n"); // maintien de connexion d'un proxy ou d'un fournisseur
+    res.write("data: \n\n");
+    res.write(delta("jour", "stop"));
+    res.end("data: [DONE]\n\n");
+  });
+  t.after(() => api.close());
+  const r = await postChat(api.url, INIT, LIMITS);
+  assert.equal(r.data.choices[0].message.content, "Bonjour");
+  assert.equal(r.data.choices[0].finish_reason, "stop");
+});
+
+test("le type de contenu est reconnu quelle que soit sa casse (un proxy peut la réécrire)", async (t) => {
+  const api = await fakeApi((req, res) => {
+    res.writeHead(200, { "Content-Type": "Text/Event-Stream; charset=UTF-8" });
+    res.write(delta("ok", "stop"));
+    res.end("data: [DONE]\n\n");
+  });
+  t.after(() => api.close());
+  const r = await postChat(api.url, INIT, LIMITS);
+  assert.equal(r.ok, true);
+  assert.equal(r.data.choices[0].message.content, "ok");
+});
+
 test("onText reçoit la réflexion et la réponse au fil de l'eau, dans l'ordre, sans rien changer au résultat", async (t) => {
   const api = await fakeApi((req, res) => {
     sse(res);
