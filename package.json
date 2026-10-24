@@ -1,17 +1,21 @@
 {
   "name": "claude-worker-delegation",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server that lets Claude Code delegate bulk work to cheap OpenRouter models, with tiers, a daily budget cap, and cost logging.",
   "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test \"test/*.test.js\"",
     "smoke": "node smoke-test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "keywords": ["mcp", "claude-code", "openrouter", "llm", "agents"],
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.1",
-    "zod": "^4.6.5"
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
   }
 }
