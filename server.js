@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { createBudget } from "./lib/budget.js";
 import { apiUrl, loadConfig } from "./lib/config.js";
 import { makeGuard } from "./lib/guard.js";
-import { postJson } from "./lib/http.js";
+import { postChat } from "./lib/http.js";
 import { readCompletion, writeOutput } from "./lib/output.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -95,17 +95,18 @@ async function runJob({ task, tier = "fast", files, write_to, max_tokens, overwr
   const release = budget.reserve();
   try {
     const started = Date.now();
-    const { status, ok, data } = await postJson(API_URL, {
+    const { status, ok, data } = await postChat(API_URL, {
       headers: { Authorization: `Bearer ${KEY}`, "Content-Type": "application/json", "X-Title": "claude-workers-mcp" },
       body: JSON.stringify({
         model: t.model,
         max_tokens: max_tokens || CFG.default_max_tokens,
+        stream: true, // see lib/http.js: a silent connection is dropped long before a reasoning model finishes
         usage: { include: true },
         ...(CFG.provider && { provider: CFG.provider }),
         ...t.params, // per-tier extras, e.g. disabling reasoning on the fast tier
         messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }],
       }),
-    }, CFG.request_timeout_ms);
+    }, { timeoutMs: CFG.request_timeout_ms, idleMs: CFG.stream_idle_timeout_ms });
     if (!ok || data.error) throw new Error(`OpenRouter ${status}: ${JSON.stringify(data.error || data).slice(0, 500)}`);
     const choice = data.choices?.[0];
     const u = data.usage || {};
@@ -113,13 +114,14 @@ async function runJob({ task, tier = "fast", files, write_to, max_tokens, overwr
     const rec = {
       ts: new Date().toISOString(), tier, model: data.model || t.model,
       in: u.prompt_tokens || 0, out: u.completion_tokens || 0,
+      reasoning: u.completion_tokens_details?.reasoning_tokens, // part of `out` spent thinking, when reported
       cost: costKnown ? u.cost : CFG.fallback_cost_usd, cost_estimated: !costKnown,
       ms: Date.now() - started,
       // Never the task text itself: it may quote a secret or a private document.
       task_chars: task.length, task_sha256: crypto.createHash("sha256").update(task).digest("hex").slice(0, 12),
     };
     fs.appendFileSync(LOG, JSON.stringify(rec) + "\n", { mode: 0o600 }); // billed, so logged even if the output is unusable
-    const meta = `[${tier}/${rec.model} in=${rec.in} out=${rec.out} $${rec.cost.toFixed(5)}${costKnown ? "" : " (estimated)"} ${rec.ms}ms]`;
+    const meta = `[${tier}/${rec.model} in=${rec.in} out=${rec.out}${rec.reasoning === undefined ? "" : ` (reasoning ${rec.reasoning})`} $${rec.cost.toFixed(5)}${costKnown ? "" : " (estimated)"} ${rec.ms}ms]`;
 
     const { text, truncated } = readCompletion(choice);
     if (outPath) {

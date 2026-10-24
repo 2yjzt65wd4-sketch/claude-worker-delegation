@@ -21,7 +21,20 @@ async function startFakeApi() {
       requests.push(JSON.parse(raw));
       const { content, finish_reason, cost } = state.reply(requests.at(-1));
       await new Promise((r) => setTimeout(r, 30));
-      const usage = { prompt_tokens: 10, completion_tokens: 5, ...(cost === undefined ? {} : { cost }) };
+      const usage = { prompt_tokens: 10, completion_tokens: 5, ...(cost === undefined ? {} : { cost }), ...state.usageExtra };
+      if (state.sse) {
+        // comme OpenRouter : commentaire de maintien, contenu en morceaux, chunk d'usage, puis [DONE]
+        const chunk = (obj) => `data: ${JSON.stringify({ model: "fake/model", ...obj })}\n\n`;
+        const half = Math.ceil(content.length / 2);
+        res.setHeader("content-type", "text/event-stream");
+        res.write(": OPENROUTER PROCESSING\n\n");
+        for (const piece of [content.slice(0, half), content.slice(half)]) {
+          res.write(chunk({ choices: [{ delta: { content: piece }, finish_reason: null }] }));
+        }
+        res.write(chunk({ choices: [{ delta: { content: "" }, finish_reason }], usage }));
+        res.end("data: [DONE]\n\n");
+        return;
+      }
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ model: "fake/model", choices: [{ message: { content }, finish_reason }], usage }));
     });
@@ -163,6 +176,35 @@ test("une sortie tronquée ou vide n'est jamais écrite, mais reste facturée au
   assert.match(empty.text, /empty completion/);
   assert.equal(s.exists("src/d.py"), false);
   assert.equal(s.usage().length, 2);
+});
+
+test("une réponse en flux est assemblée, écrite en entier, et son coût et son raisonnement sont journalisés", SECOND, async (t) => {
+  const s = await startServer();
+  t.after(() => s.close());
+  s.api.state.sse = true;
+  s.api.state.usageExtra = { completion_tokens: 900, completion_tokens_details: { reasoning_tokens: 850 } };
+  s.api.state.reply = () => ({ content: "def f():\n    return 1\n", finish_reason: "stop", cost: 0.004 });
+  const r = await s.call("delegate", { task: "t", write_to: "src/e.py" });
+  assert.equal(r.error, false);
+  assert.equal(s.read("src/e.py"), "def f():\n    return 1\n");
+  assert.match(r.text, /out=900 \(reasoning 850\)/);
+  assert.equal(s.api.requests[0].stream, true);
+  const [rec] = s.usage();
+  assert.equal(rec.cost, 0.004);
+  assert.equal(rec.out, 900);
+  assert.equal(rec.reasoning, 850);
+});
+
+test("une réponse en flux coupée au plafond est refusée par write_to, comme une réponse ordinaire", SECOND, async (t) => {
+  const s = await startServer();
+  t.after(() => s.close());
+  s.api.state.sse = true;
+  s.api.state.reply = () => ({ content: "def f():\n    ret", finish_reason: "length", cost: 0.001 });
+  const r = await s.call("delegate", { task: "t", write_to: "src/f.py" });
+  assert.equal(r.error, true);
+  assert.match(r.text, /truncated/);
+  assert.equal(s.exists("src/f.py"), false);
+  assert.equal(s.usage().length, 1);
 });
 
 test("une réponse tronquée sans write_to est renvoyée avec un avertissement", SECOND, async (t) => {
