@@ -3,27 +3,34 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createBudget } from "./lib/budget.js";
+import { apiUrl, loadConfig } from "./lib/config.js";
+import { makeGuard } from "./lib/guard.js";
+import { readCompletion, writeOutput } from "./lib/output.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const CFG = JSON.parse(fs.readFileSync(path.join(HERE, "models.json"), "utf8"));
-const LOG = path.join(HERE, "usage.jsonl");
+const CFG = loadConfig(HERE);
+const LOG = process.env.WORKERS_USAGE_LOG || path.join(HERE, "usage.jsonl");
 const KEY = process.env.OPENROUTER_API_KEY;
+const API_URL = apiUrl(process.env.WORKERS_TEST_BASE_URL);
 
-// Files may only be read/written under the session cwd or extra roots (WORKERS_ALLOWED_ROOTS, ';'-separated).
-const ROOTS = [process.cwd(), ...(process.env.WORKERS_ALLOWED_ROOTS || "").split(";").filter(Boolean)]
-  .map((r) => path.resolve(r).toLowerCase());
-
-function safePath(p) {
-  const abs = path.resolve(process.cwd(), p);
-  const low = abs.toLowerCase();
-  if (!ROOTS.some((r) => low === r || low.startsWith(r + path.sep))) {
-    throw new Error(`path outside allowed roots: ${abs} (allowed: ${ROOTS.join(", ")})`);
-  }
-  return abs;
-}
+// Path policy (see lib/guard.js). All lists are ';'-separated.
+//  WORKERS_ALLOWED_ROOTS  extra read-only roots besides the session cwd
+//  WORKERS_DENY           relative paths refused for read and write (secrets, .env*, .git, keys are always refused)
+//  WORKERS_WRITE_ROOTS    folders where write_to may create files; unset = write_to is disabled
+//  WORKERS_WRITE_DENY     relative paths refused for write inside the write roots
+const list = (value) => (value || "").split(";").filter(Boolean);
+const guard = makeGuard({
+  cwd: process.cwd(),
+  extraRoots: list(process.env.WORKERS_ALLOWED_ROOTS),
+  deny: list(process.env.WORKERS_DENY),
+  writeRoots: list(process.env.WORKERS_WRITE_ROOTS),
+  writeDeny: list(process.env.WORKERS_WRITE_DENY),
+});
 
 const SYSTEM = `You are a worker model taking orders from a senior architect model.
 Rules:
@@ -33,71 +40,102 @@ Rules:
 - For summaries, be dense: bullet points, concrete names/lines/numbers.
 - If the task is ambiguous or impossible, say so in one line and stop.`;
 
-function spentToday() {
-  if (!fs.existsSync(LOG)) return 0;
-  const day = new Date().toISOString().slice(0, 10);
+function readRows() {
+  if (!fs.existsSync(LOG)) return [];
   return fs.readFileSync(LOG, "utf8").split("\n").filter(Boolean)
     .map((l) => { try { return JSON.parse(l); } catch { return null; } })
-    .filter((r) => r && r.ts.startsWith(day))
-    .reduce((s, r) => s + (r.cost || 0), 0);
+    .filter(Boolean);
+}
+
+function spentToday() {
+  const day = new Date().toISOString().slice(0, 10);
+  return readRows().filter((r) => r.ts.startsWith(day)).reduce((s, r) => s + (r.cost || 0), 0);
+}
+
+const budget = createBudget({ limit: CFG.daily_budget_usd, reservePerJob: CFG.reserve_usd_per_job, spentToday });
+
+function readCapped(real) {
+  const fd = fs.openSync(real, "r");
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw new Error(`refused: ${real} is not a regular file`);
+    const buf = Buffer.alloc(Math.min(st.size, CFG.max_file_bytes));
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    return { text: buf.toString("utf8", 0, n), total: st.size };
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function buildPrompt(task, files = []) {
   let body = `TASK:\n${task}\n`;
   for (const f of files) {
-    const abs = safePath(f);
-    const buf = fs.readFileSync(abs);
-    const text = buf.subarray(0, CFG.max_file_bytes).toString("utf8");
-    const cut = buf.length > CFG.max_file_bytes ? `\n[...truncated, ${buf.length} bytes total]` : "";
+    const { text, total } = readCapped(guard.checkRead(f));
+    const cut = total > CFG.max_file_bytes ? `\n[...truncated, ${total} bytes total]` : "";
     body += `\n===== FILE: ${f} =====\n${text}${cut}\n===== END FILE =====\n`;
   }
   return body;
 }
 
-async function runJob({ task, tier = "fast", files, write_to, max_tokens }) {
+async function runJob({ task, tier = "fast", files, write_to, max_tokens, overwrite = false }) {
   if (!KEY) throw new Error("OPENROUTER_API_KEY is not set in the environment");
   const t = CFG.tiers[tier];
   if (!t) throw new Error(`unknown tier "${tier}" (have: ${Object.keys(CFG.tiers).join(", ")})`);
-  const spent = spentToday();
-  if (spent >= CFG.daily_budget_usd) {
-    throw new Error(`daily worker budget $${CFG.daily_budget_usd} reached ($${spent.toFixed(4)} spent) — edit models.json to raise it`);
+  // Everything that can be refused is refused before a paid call is made.
+  const prompt = buildPrompt(task, files);
+  const outPath = write_to ? guard.checkWrite(write_to) : null;
+  if (outPath && !overwrite && fs.existsSync(outPath)) {
+    throw new Error(`${write_to} already exists; pass overwrite:true to replace it`);
   }
-  const outPath = write_to ? safePath(write_to) : null;
-  const started = Date.now();
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${KEY}`, "Content-Type": "application/json", "X-Title": "claude-workers-mcp" },
-    body: JSON.stringify({
-      model: t.model,
-      max_tokens: max_tokens || CFG.default_max_tokens,
-      usage: { include: true },
-      ...(CFG.provider && { provider: CFG.provider }),
-      ...t.params, // per-tier extras, e.g. disabling reasoning on the fast tier
-      messages: [{ role: "system", content: SYSTEM }, { role: "user", content: buildPrompt(task, files) }],
-    }),
-  });
-  const data = await res.json();
-  if (!res.ok || data.error) throw new Error(`OpenRouter ${res.status}: ${JSON.stringify(data.error || data).slice(0, 500)}`);
-  const text = data.choices?.[0]?.message?.content ?? "";
-  const u = data.usage || {};
-  const rec = {
-    ts: new Date().toISOString(), tier, model: data.model || t.model,
-    in: u.prompt_tokens || 0, out: u.completion_tokens || 0, cost: u.cost || 0,
-    ms: Date.now() - started, task: task.slice(0, 120),
-  };
-  fs.appendFileSync(LOG, JSON.stringify(rec) + "\n");
-  const meta = `[${tier}/${rec.model} in=${rec.in} out=${rec.out} $${rec.cost.toFixed(5)} ${rec.ms}ms]`;
+  const release = budget.reserve();
+  try {
+    const started = Date.now();
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${KEY}`, "Content-Type": "application/json", "X-Title": "claude-workers-mcp" },
+      signal: AbortSignal.timeout(CFG.request_timeout_ms),
+      body: JSON.stringify({
+        model: t.model,
+        max_tokens: max_tokens || CFG.default_max_tokens,
+        usage: { include: true },
+        ...(CFG.provider && { provider: CFG.provider }),
+        ...t.params, // per-tier extras, e.g. disabling reasoning on the fast tier
+        messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }],
+      }),
+    });
+    const data = await res.json().catch(() => ({ error: { message: `non-JSON response (HTTP ${res.status})` } }));
+    if (!res.ok || data.error) throw new Error(`OpenRouter ${res.status}: ${JSON.stringify(data.error || data).slice(0, 500)}`);
+    const choice = data.choices?.[0];
+    const u = data.usage || {};
+    const costKnown = typeof u.cost === "number";
+    const rec = {
+      ts: new Date().toISOString(), tier, model: data.model || t.model,
+      in: u.prompt_tokens || 0, out: u.completion_tokens || 0,
+      cost: costKnown ? u.cost : CFG.fallback_cost_usd, cost_estimated: !costKnown,
+      ms: Date.now() - started,
+      // Never the task text itself: it may quote a secret or a private document.
+      task_chars: task.length, task_sha256: crypto.createHash("sha256").update(task).digest("hex").slice(0, 12),
+    };
+    fs.appendFileSync(LOG, JSON.stringify(rec) + "\n", { mode: 0o600 }); // billed, so logged even if the output is unusable
+    const meta = `[${tier}/${rec.model} in=${rec.in} out=${rec.out} $${rec.cost.toFixed(5)}${costKnown ? "" : " (estimated)"} ${rec.ms}ms]`;
 
-  if (outPath) {
-    fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    fs.writeFileSync(outPath, text);
-    const lines = text.split("\n");
-    return `${meta}\nwrote ${lines.length} lines to ${outPath}\n--- first 20 lines ---\n${lines.slice(0, 20).join("\n")}`;
+    const { text, truncated } = readCompletion(choice);
+    if (outPath) {
+      if (truncated) {
+        throw new Error("completion truncated at max_tokens (finish_reason=length): nothing was written. Raise max_tokens or split the task.");
+      }
+      writeOutput(outPath, text, overwrite);
+      const lines = text.split("\n");
+      return `${meta}\nwrote ${lines.length} lines to ${outPath}\n--- first 20 lines ---\n${lines.slice(0, 20).join("\n")}`;
+    }
+    const answer = truncated ? `${text}\n[TRUNCATED: the worker hit max_tokens, the end of its answer is missing]` : text;
+    const capped = answer.length > CFG.max_return_chars
+      ? answer.slice(0, CFG.max_return_chars) + `\n[...truncated ${answer.length - CFG.max_return_chars} chars; use write_to for full output]`
+      : answer;
+    return `${meta}\n${capped}`;
+  } finally {
+    release();
   }
-  const capped = text.length > CFG.max_return_chars
-    ? text.slice(0, CFG.max_return_chars) + `\n[...truncated ${text.length - CFG.max_return_chars} chars; use write_to for full output]`
-    : text;
-  return `${meta}\n${capped}`;
 }
 
 const jobShape = {
@@ -105,11 +143,12 @@ const jobShape = {
   tier: z.enum(Object.keys(CFG.tiers)).default("fast").describe(
     Object.entries(CFG.tiers).map(([k, v]) => `${k}: ${v.use}`).join("; ")),
   files: z.array(z.string()).optional().describe("Paths the server loads into the worker prompt — do NOT read them yourself first."),
-  write_to: z.string().optional().describe("Save full output here and return only a 20-line preview. Use for anything > ~50 lines."),
+  write_to: z.string().optional().describe("Save full output here and return only a 20-line preview. Use for anything > ~50 lines. Refused outside the configured write roots, and never replaces an existing file unless overwrite is true."),
+  overwrite: z.boolean().optional().describe("Allow write_to to replace an existing file. Default false."),
   max_tokens: z.number().int().positive().optional(),
 };
 
-const server = new McpServer({ name: "workers", version: "1.0.0" });
+const server = new McpServer({ name: "workers", version: "1.1.0" });
 const ok = (text) => ({ content: [{ type: "text", text }] });
 const fail = (e) => ({ isError: true, content: [{ type: "text", text: String(e.message || e) }] });
 
@@ -139,10 +178,10 @@ server.registerTool("worker_stats", {
   description: "Worker token/cost totals: today and all-time, by tier.",
   inputSchema: {},
 }, async () => {
-  if (!fs.existsSync(LOG)) return ok("no worker calls yet");
-  const rows = fs.readFileSync(LOG, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const rows = readRows();
+  if (rows.length === 0) return ok("no worker calls yet");
   const day = new Date().toISOString().slice(0, 10);
-  const agg = (rs) => rs.reduce((a, r) => ({ n: a.n + 1, in: a.in + r.in, out: a.out + r.out, cost: a.cost + r.cost }),
+  const agg = (rs) => rs.reduce((a, r) => ({ n: a.n + 1, in: a.in + (r.in || 0), out: a.out + (r.out || 0), cost: a.cost + (r.cost || 0) }),
     { n: 0, in: 0, out: 0, cost: 0 });
   const fmt = (a) => `${a.n} calls, ${a.in} in / ${a.out} out tokens, $${a.cost.toFixed(4)}`;
   const tiers = Object.keys(CFG.tiers).map((t) => `  ${t}: ${fmt(agg(rows.filter((r) => r.tier === t)))}`).join("\n");
