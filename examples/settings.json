@@ -11,7 +11,7 @@
       {
         "matcher": "Read|Bash|PowerShell",
         "hooks": [
-          { "type": "command", "command": "node", "args": ["/path/to/claude-worker-delegation/hooks/delegate-large-reads.js"] }
+          { "type": "command", "command": "node", "args": ["/path/to/claude-worker-delegation/hooks/delegate-large-reads.cjs"] }
         ]
       }
     ]

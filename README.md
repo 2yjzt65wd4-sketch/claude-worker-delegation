@@ -35,7 +35,7 @@ Premium models are great at planning and review, but paying premium rates for th
 - **Path sandbox.** Workers can only read and write files under the session's working directory, plus any extra roots set in `WORKERS_ALLOWED_ROOTS`.
 - **Guard-railed worker prompt.** Workers are told to answer tersely, return unified diffs for code, and never invent file contents they weren't shown.
 - **Provider settings.** OpenRouter routing sorts by price, allows fallbacks, and denies data collection.
-- **Large-read hook** (`hooks/delegate-large-reads.js`). A Claude Code `PreToolUse` hook that blocks whole-file reads over 50 KB, whether through `Read`, `cat`, or `Get-Content`, and points Claude to `delegate` instead.
+- **Large-read hook** (`hooks/delegate-large-reads.cjs`). A Claude Code `PreToolUse` hook that blocks whole-file reads over 50 KB, whether through `Read`, `cat`, or `Get-Content`, and points Claude to `delegate` instead.
 
 ## Real usage
 
