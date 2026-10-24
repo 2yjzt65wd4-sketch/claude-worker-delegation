@@ -23,6 +23,8 @@ const API_URL = apiUrl(process.env.WORKERS_TEST_BASE_URL);
 //  WORKERS_DENY           relative paths refused for read and write (secrets, .env*, .git, keys are always refused)
 //  WORKERS_WRITE_ROOTS    folders where write_to may create files; unset = write_to is disabled
 //  WORKERS_WRITE_DENY     relative paths refused for write inside the write roots
+//  WORKERS_WORKTREE_DIRS  folders (inside the project) holding git worktrees, e.g. ".claude/worktrees": each worktree
+//                         is judged against its own root instead of being hidden by a denied parent folder
 const list = (value) => (value || "").split(";").filter(Boolean);
 const guard = makeGuard({
   cwd: process.cwd(),
@@ -30,6 +32,7 @@ const guard = makeGuard({
   deny: list(process.env.WORKERS_DENY),
   writeRoots: list(process.env.WORKERS_WRITE_ROOTS),
   writeDeny: list(process.env.WORKERS_WRITE_DENY),
+  worktreeDirs: list(process.env.WORKERS_WORKTREE_DIRS),
 });
 
 const SYSTEM = `You are a worker model taking orders from a senior architect model.

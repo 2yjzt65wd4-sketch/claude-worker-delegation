@@ -83,9 +83,11 @@ The server sends the files it is given to a third-party model and writes the mod
 | `WORKERS_DENY` | Relative paths refused for read and write, on top of the built-in secret rules. |
 | `WORKERS_WRITE_ROOTS` | Folders where `write_to` may create files. Unset means `write_to` is refused. |
 | `WORKERS_WRITE_DENY` | Relative paths refused for write inside the write roots. |
+| `WORKERS_WORKTREE_DIRS` | Folders inside the project that hold git worktrees, e.g. `.claude/worktrees`. Unset means no special case. |
 | `WORKERS_USAGE_LOG` | Where the usage log goes (default `usage.jsonl` next to the server). |
 
 - Every path is resolved with `realpath` first, so a symlink cannot reach outside the roots. A `write_to` target that is itself a symlink is refused.
+- Sub-agents often work in git worktrees stored under a denied folder such as `.claude`. With `WORKERS_WORKTREE_DIRS`, a resolved path inside a subfolder that has a regular `.git` file is judged against that worktree's own root: `WORKERS_DENY`, `WORKERS_WRITE_ROOTS` and `WORKERS_WRITE_DENY` apply relative to it, so its copy of a protected file (say `docs/plan.md`) stays protected. A `.git` folder, a symlink or a plain neighbouring folder is not a worktree. The server resolves a relative path from its own working directory, not from the caller's: a client working in a worktree must send absolute paths.
 - A completion that is empty, or cut by `max_tokens`, is never written; it is still logged, since it was billed. An existing file is replaced only with `overwrite: true`, and never through a link.
 - The daily budget is reserved before the call, so parallel jobs cannot overshoot it. A missing cost is charged at `fallback_cost_usd`, not zero.
 - The usage log holds the length and a short hash of each task, never its text, and is created with mode 0600.

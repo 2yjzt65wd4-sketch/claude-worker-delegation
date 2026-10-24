@@ -33,13 +33,22 @@ async function startFakeApi() {
   };
 }
 
-async function startServer({ spent = 0 } = {}) {
+async function startServer({ spent = 0, worktree = false } = {}) {
   const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "srv-")));
   const project = path.join(tmp, "repo");
   for (const d of ["src", "docs"]) fs.mkdirSync(path.join(project, d), { recursive: true });
   fs.writeFileSync(path.join(project, ".env"), "SECRET-CONTENT-123");
   fs.writeFileSync(path.join(project, "docs", "plan.md"), "PLAN-CONTENT-456");
   fs.writeFileSync(path.join(project, "src", "a.js"), "export const a = 1;\n");
+  if (worktree) {
+    // a git worktree under .claude, which is on the deny list, with its own copy of the plan
+    const wt = path.join(project, ".claude", "worktrees", "agent-1");
+    for (const d of ["src", "docs"]) fs.mkdirSync(path.join(wt, d), { recursive: true });
+    fs.writeFileSync(path.join(wt, ".git"), "gitdir: x\n");
+    fs.writeFileSync(path.join(wt, "src", "a.js"), "export const a = 1;\n");
+    fs.writeFileSync(path.join(wt, "docs", "plan.md"), "PLAN-CONTENT-456");
+    fs.writeFileSync(path.join(project, ".claude", "settings.json"), "{}");
+  }
   const usageLog = path.join(tmp, "usage.jsonl");
   if (spent) fs.writeFileSync(usageLog, JSON.stringify({ ts: new Date().toISOString(), tier: "fast", cost: spent }) + "\n");
   const api = await startFakeApi();
@@ -54,6 +63,7 @@ async function startServer({ spent = 0 } = {}) {
       WORKERS_WRITE_ROOTS: "src;tests",
       WORKERS_DENY: "docs/plan.md",
       WORKERS_USAGE_LOG: usageLog,
+      ...(worktree && { WORKERS_DENY: ".claude;docs/plan.md", WORKERS_WORKTREE_DIRS: ".claude/worktrees" }),
     },
   }));
   return {
@@ -78,6 +88,23 @@ test("refuse .env et le plan sans jamais appeler l'API", SECOND, async (t) => {
     assert.match(r.text, /refused/);
   }
   assert.equal(s.api.requests.length, 0);
+});
+
+test("un worktree rangé sous un dossier refusé est jugé par rapport à sa propre racine", SECOND, async (t) => {
+  const s = await startServer({ worktree: true });
+  t.after(() => s.close());
+  const wt = path.join(s.project, ".claude", "worktrees", "agent-1");
+  const ok = await s.call("delegate", {
+    task: "résume", files: [path.join(wt, "src", "a.js")], write_to: path.join(wt, "src", "out.js"),
+  });
+  assert.equal(ok.error, false, ok.text);
+  assert.ok(fs.existsSync(path.join(wt, "src", "out.js")));
+  for (const file of [path.join(wt, "docs", "plan.md"), path.join(s.project, ".claude", "settings.json")]) {
+    const r = await s.call("delegate", { task: "résume", files: [file] });
+    assert.equal(r.error, true, file);
+    assert.match(r.text, /refused/, file);
+  }
+  assert.equal(s.api.requests.length, 1);
 });
 
 test("refuse write_to hors des dossiers autorisés", SECOND, async (t) => {
