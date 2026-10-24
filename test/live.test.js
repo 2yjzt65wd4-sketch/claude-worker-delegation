@@ -52,7 +52,7 @@ test("seuls les `keep` derniers journaux sont conservés, sans toucher aux autre
   fs.writeFileSync(path.join(dir, "notes.txt"), "à moi");
   const names = [];
   for (let i = 0; i < 5; i++) {
-    const log = openLiveLog(dir, { tier: "fast", keep: 3 });
+    const log = openLiveLog(dir, { tier: "fast", keep: 3, spareMs: 0 });
     log.close();
     names.push(path.basename(log.file));
   }
@@ -67,12 +67,76 @@ test("des journaux créés dans la même milliseconde sont élagués dans l'ordr
   const instant = () => new Date("2026-10-24T14:00:00.000Z"); // la même milliseconde pour tous
   const created = [];
   for (let i = 0; i < 10; i++) {
-    const log = openLiveLog(dir, { tier: "reason", keep: 3, now: instant });
+    const log = openLiveLog(dir, { tier: "reason", keep: 3, spareMs: 0, now: instant });
     log.close();
     created.push(path.basename(log.file));
   }
   const left = fs.readdirSync(dir).filter((n) => n.endsWith(".log") && n !== "latest.log").sort();
   assert.deepEqual(left, created.slice(-3));
+});
+
+test("un journal encore actif n'est jamais élagué, même si d'autres jobs démarrent après lui", (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const long = openLiveLog(dir, { tier: "reason", keep: 3 }); // un job de 30 minutes, toujours en train d'écrire
+  long.text("reasoning", "toujours en cours");
+  for (let i = 0; i < 10; i++) openLiveLog(dir, { tier: "fast", keep: 3 }).close();
+  assert.ok(fs.existsSync(long.file), "le journal d'un job en cours a été supprimé");
+  long.close();
+});
+
+test("spareMs: 0 désactive la protection même si les horodatages du système de fichiers devancent l'horloge", (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const created = [];
+  for (let i = 0; i < 5; i++) {
+    const log = openLiveLog(dir, { tier: "fast", keep: 100 });
+    log.close();
+    created.push(path.basename(log.file));
+  }
+  const ahead = new Date(Date.now() + 3600 * 1000); // un fichier daté d'une heure dans le futur
+  for (const name of created) fs.utimesSync(path.join(dir, name), ahead, ahead);
+  openLiveLog(dir, { tier: "fast", keep: 3, spareMs: 0 }).close();
+  const left = fs.readdirSync(dir).filter((n) => n.endsWith(".log") && n !== "latest.log");
+  assert.equal(left.length, 3);
+});
+
+test("une écriture partielle ne perd pas la suite du texte", (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const log = openLiveLog(dir, { tier: "reason", flushMs: 60000 });
+  const real = fs.writeSync;
+  // un disque presque plein : chaque appel n'écrit que 5 octets
+  t.mock.method(fs, "writeSync", (fd, data, ...rest) =>
+    typeof data === "string" ? real(fd, data.slice(0, 5)) : real(fd, data, rest[0], Math.min(rest[1], 5)));
+  log.text("reasoning", "0123456789abcdefghij");
+  log.close();
+  t.mock.restoreAll();
+  assert.match(fs.readFileSync(log.file, "utf8"), /0123456789abcdefghij/);
+});
+
+test("la fermeture est idempotente : un second close() ne ferme pas le descripteur d'un autre journal", (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const a = openLiveLog(dir, { tier: "fast" });
+  a.close();
+  const b = openLiveLog(dir, { tier: "reason" }); // récupère très probablement le numéro de descripteur libéré par a
+  a.close();
+  b.text("reasoning", "toujours écrit");
+  b.close();
+  assert.match(fs.readFileSync(b.file, "utf8"), /toujours écrit/);
+});
+
+test("si l'ouverture du nouveau journal échoue, aucun ancien journal n'est supprimé", (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  for (let i = 0; i < 5; i++) openLiveLog(dir, { tier: "fast", keep: 100 }).close();
+  const before = fs.readdirSync(dir).filter((n) => n !== "latest.log").sort();
+  t.mock.method(fs, "openSync", () => { throw Object.assign(new Error("trop de fichiers ouverts"), { code: "EMFILE" }); });
+  const log = openLiveLog(dir, { tier: "fast", keep: 2, spareMs: 0 });
+  log.close();
+  t.mock.restoreAll();
+  assert.deepEqual(fs.readdirSync(dir).filter((n) => n !== "latest.log").sort(), before);
 });
 
 test("un dossier impossible à créer désactive le journal sans jamais lever d'erreur", (t) => {

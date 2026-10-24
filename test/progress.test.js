@@ -82,3 +82,10 @@ test("un envoi qui échoue n'a aucune conséquence", async () => {
   await wait(60);
   progress.stop(); // aucune exception, aucun rejet non géré
 });
+
+test("un sendNotification qui lève de façon synchrone ne fait pas tomber le processus", async () => {
+  const extra = { _meta: { progressToken: "t" }, sendNotification: () => { throw new Error("transport fermé"); } };
+  const progress = createProgress(extra, { intervalMs: 10, label: "reason" });
+  await wait(60);
+  progress.stop();
+});
