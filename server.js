@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { createBudget } from "./lib/budget.js";
 import { apiUrl, loadConfig } from "./lib/config.js";
 import { makeGuard } from "./lib/guard.js";
+import { postJson } from "./lib/http.js";
 import { readCompletion, writeOutput } from "./lib/output.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -93,10 +94,8 @@ async function runJob({ task, tier = "fast", files, write_to, max_tokens, overwr
   const release = budget.reserve();
   try {
     const started = Date.now();
-    const res = await fetch(API_URL, {
-      method: "POST",
+    const { status, ok, data } = await postJson(API_URL, {
       headers: { Authorization: `Bearer ${KEY}`, "Content-Type": "application/json", "X-Title": "claude-workers-mcp" },
-      signal: AbortSignal.timeout(CFG.request_timeout_ms),
       body: JSON.stringify({
         model: t.model,
         max_tokens: max_tokens || CFG.default_max_tokens,
@@ -105,9 +104,8 @@ async function runJob({ task, tier = "fast", files, write_to, max_tokens, overwr
         ...t.params, // per-tier extras, e.g. disabling reasoning on the fast tier
         messages: [{ role: "system", content: SYSTEM }, { role: "user", content: prompt }],
       }),
-    });
-    const data = await res.json().catch(() => ({ error: { message: `non-JSON response (HTTP ${res.status})` } }));
-    if (!res.ok || data.error) throw new Error(`OpenRouter ${res.status}: ${JSON.stringify(data.error || data).slice(0, 500)}`);
+    }, CFG.request_timeout_ms);
+    if (!ok || data.error) throw new Error(`OpenRouter ${status}: ${JSON.stringify(data.error || data).slice(0, 500)}`);
     const choice = data.choices?.[0];
     const u = data.usage || {};
     const costKnown = typeof u.cost === "number";
