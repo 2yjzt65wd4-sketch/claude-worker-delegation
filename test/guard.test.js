@@ -187,3 +187,31 @@ test("worktree : le dossier des worktrees doit rester dans la racine du projet",
   assert.throws(() => makeGuard({ cwd: root, worktreeDirs: ["../outside-dir"] }), /inside the project root/);
   assert.throws(() => makeGuard({ cwd: root, worktreeDirs: ["."] }), /inside the project root/);
 });
+
+test("refuse les noms courts Windows (8.3), en lecture comme en écriture", () => {
+  for (const f of ["ENV~1", "tests/TEST_G~1.PY"]) touch(f);
+  assert.throws(() => guard.checkRead("ENV~1"), /short name/);
+  assert.throws(() => guard.checkWrite("tests/TEST_G~1.PY"), /short name/);
+  assert.throws(() => guard.checkWrite("src/NEW~1.JS"), /short name/);
+});
+
+test("refuse un nom absent de la liste de son dossier, alias que realpath laisse intact", (t) => {
+  assert.equal(guard.checkRead("src/mod.js"), path.join(root, "src", "mod.js"));
+  const listing = fs.readdirSync;
+  // ext4 ne crée pas d'alias : on retire le nom réel de la liste, comme drvfs le montre.
+  t.mock.method(fs, "readdirSync", (dir, ...rest) => listing(dir, ...rest).filter((n) => n !== "mod.js"));
+  assert.throws(() => guard.checkRead("src/mod.js"), /not the name listed/);
+  assert.throws(() => guard.checkWrite("src/mod.js"), /not the name listed/);
+  assert.equal(guard.checkWrite("src/not-yet.js"), path.join(root, "src", "not-yet.js"));
+});
+
+const here = process.cwd();
+test(
+  "sur un disque qui résout les alias (NTFS par drvfs), refuse la variante de casse",
+  { skip: !fs.existsSync(path.join(here, "PACKAGE.JSON")) && "ce disque ne résout pas les variantes de casse" },
+  () => {
+    const real = makeGuard({ cwd: here });
+    assert.equal(real.checkRead("package.json"), path.join(fs.realpathSync(here), "package.json"));
+    assert.throws(() => real.checkRead("PACKAGE.JSON"), /not the name listed/);
+  },
+);
